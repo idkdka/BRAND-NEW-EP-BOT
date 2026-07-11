@@ -47,20 +47,6 @@ client.once(Events.ClientReady, async (c) => {
 
 client.on(Events.GuildCreate, (guild) => registerForGuild(guild));
 
-// ---------- New members get their starting rank ----------
-
-client.on(Events.GuildMemberAdd, async (member) => {
-  try {
-    if (member.user.bot) return;
-    const ranks = getRanks(member.guild.id);
-    if (!ranks.length) return;
-    const xp = getPoints(member.guild.id, member.id).xp; // 0 for brand-new members
-    await syncRank(member, xp, ranks); // gives the 0-XP rank (e.g. Rank 1)
-  } catch (err) {
-    console.error('GuildMemberAdd rank sync failed:', err.message);
-  }
-});
-
 // ---------- Interaction routing ----------
 
 client.on(Events.InteractionCreate, async (interaction) => {
