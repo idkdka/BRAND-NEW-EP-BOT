@@ -156,7 +156,7 @@ export function setRanks(guildId, ranks) {
 const GROUP_DEFAULTS = {
   group_id: '367883697',
   log_channel_1: '1490877177342984243',
-  log_channel_2: '1540176007733059664',
+  log_channel_2: '1540468163618152590',
   hicom_role: null, // falls back to main config hicom_role if left null
   uh_role: null, // falls back to main config upper_hicom_role if left null
   staff_role: null,
