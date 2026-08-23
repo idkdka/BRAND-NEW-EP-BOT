@@ -87,8 +87,12 @@ export async function getUserInfo(userId) {
 
 export async function acceptJoinRequest(groupId, robloxUserId) {
   if (!apiKey()) return { error: 'Roblox API key is not configured (set `ROBLOX_API_KEY`).' };
+  // Open Cloud's gateway rejects a POST with no body at all as a malformed JSON
+  // payload (HTTP 400) even though this method takes no fields — it still wants
+  // an explicit empty object.
   const { ok, status, json } = await ocFetch(`/groups/${groupId}/join-requests/${robloxUserId}:accept`, {
     method: 'POST',
+    body: '{}',
   });
   if (!ok) {
     if (status === 404) return { error: 'That user doesn’t have a pending join request for this group.' };
@@ -152,7 +156,7 @@ async function legacyFetch(path, options = {}, _retried = false) {
 
 // Kick (ban) a member out of the group. Returns { ok } or { error }.
 export async function kickFromGroup(groupId, robloxUserId) {
-  const result = await legacyFetch(`/groups/${groupId}/bans/${robloxUserId}`, { method: 'POST' });
+  const result = await legacyFetch(`/groups/${groupId}/bans/${robloxUserId}`, { method: 'POST', body: '{}' });
   if (result.error) return result;
   if (!result.ok) {
     const msg = result.json?.errors?.[0]?.message || result.json?.message || 'unknown';
