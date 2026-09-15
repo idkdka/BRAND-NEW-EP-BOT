@@ -15,10 +15,12 @@ import { baseEmbed, deny, sendLog, isAdmin, hasRole, hasAnyRole } from './utils.
 import {
   setRank,
   getUserInfo,
+  getUserIdFromUsername,
   acceptJoinRequest,
-  kickFromGroup,
-  unkickFromGroup,
-  listKickedFromGroup,
+  removeFromGroup,
+  banFromGroup,
+  unbanFromGroup,
+  listBannedFromGroup,
 } from './roblox.js';
 
 // Display names for the 4 group-permission tiers. Storage uses stable
@@ -70,9 +72,10 @@ function isHicomTier(member, gcfg) {
 }
 
 // Look up a Discord member's verified Roblox link. Returns { id, name } or
-// { error } — used by /groupaccept, /groupkick, and /groupunkick so they take
-// a Discord user like the rest of the bot, resolving Roblox via /verify's
-// stored link instead of asking for a raw Roblox username.
+// { error } — used by /groupaccept so it takes a Discord user like the rest
+// of the bot, resolving Roblox via /verify's stored link instead of asking
+// for a raw Roblox username (join requests only make sense for someone who's
+// gone through verification anyway).
 function resolveVerified(guildId, target) {
   const link = getVerification(guildId, target.id);
   if (!link) {
@@ -81,6 +84,37 @@ function resolveVerified(guildId, target) {
     };
   }
   return { id: link.robloxId, name: link.robloxName };
+}
+
+// Resolve a target for /groupkick, /groupban, and /groupunban: either a
+// verified Discord user (`user`) or a raw Roblox username/user ID (`roblox`),
+// for acting on someone who was never verified through this bot. Exactly one
+// of the two must be given. Returns { id, name, mention } or { error } —
+// `mention` is a Discord ping when resolved via `user`, otherwise the bolded
+// Roblox name for use in replies/logs.
+async function resolveGroupTarget(guildId, target, robloxInput) {
+  if (target && robloxInput) {
+    return { error: 'Specify a Discord user *or* a Roblox username/ID — not both.' };
+  }
+  if (!target && !robloxInput) {
+    return { error: 'Specify either a Discord user (`user`) or a Roblox username/ID (`roblox`).' };
+  }
+
+  if (target) {
+    const v = resolveVerified(guildId, target);
+    if (v.error) return v;
+    return { id: v.id, name: v.name, mention: `${target}` };
+  }
+
+  const input = robloxInput.trim();
+  if (/^\d+$/.test(input)) {
+    const info = await getUserInfo(input);
+    if (info.error) return { error: info.error };
+    return { id: info.id, name: info.name, mention: `**${info.name}**` };
+  }
+  const found = await getUserIdFromUsername(input);
+  if (found.error) return { error: found.error };
+  return { id: found.id, name: found.name, mention: `**${found.name}**` };
 }
 
 // ======================= /grouprank =======================
@@ -177,7 +211,15 @@ export async function groupAcceptCommand(interaction) {
   for (const ch of gcfg.log_channels) await sendLog(interaction.guild, ch, { embeds: [logEmbed] });
 }
 
-// ======================= /groupkick, /groupunkick, /groupkicked (HICOM only) =======================
+// ======================= /groupkick, /groupban, /groupunban, /groupbanned (HICOM only) =======================
+// Two distinct actions now, not two words for one thing (see roblox.js):
+//   /groupkick  -> plain removal, they can rejoin any time (removeFromGroup)
+//   /groupban   -> removal + blocked from rejoining until unbanned (banFromGroup)
+//   /groupunban -> lifts a ban (unbanFromGroup)
+//   /groupbanned -> lists who's currently banned (listBannedFromGroup) — there's
+//     no equivalent list for plain kicks; Roblox doesn't track those at all.
+// All three actions take either a verified Discord user or a raw Roblox
+// username/ID (resolveGroupTarget), require a reason, and log it.
 
 export async function groupKickCommand(interaction) {
   const gcfg = getGroupConfig(interaction.guildId);
@@ -187,22 +229,22 @@ export async function groupKickCommand(interaction) {
   }
 
   const target = interaction.options.getUser('user');
-  const reason = interaction.options.getString('reason') || 'No reason given';
+  const robloxInput = interaction.options.getString('roblox');
+  const reason = interaction.options.getString('reason', true);
   await interaction.deferReply();
 
-  const info = resolveVerified(interaction.guildId, target);
+  const info = await resolveGroupTarget(interaction.guildId, target, robloxInput);
   if (info.error) return interaction.editReply(`🚫 ${info.error}`);
-  const label = info.name ? `**${info.name}**` : 'their Roblox account';
 
-  const result = await kickFromGroup(gcfg.group_id, info.id);
+  const result = await removeFromGroup(gcfg.group_id, info.id);
   if (result.error) return interaction.editReply(`🚫 ${result.error}`);
 
   await interaction.editReply(
-    `✅ Kicked ${target} (${label}, ID \`${info.id}\`) from group \`${gcfg.group_id}\`.`,
+    `✅ Kicked ${info.mention} (ID \`${info.id}\`) from group \`${gcfg.group_id}\` — they can rejoin any time.`,
   );
 
   const logEmbed = baseEmbed('👢 Member Kicked')
-    .setDescription(`${target} (${label}) was kicked from group \`${gcfg.group_id}\`.`)
+    .setDescription(`${info.mention} was kicked from group \`${gcfg.group_id}\` (no ban — they can rejoin).`)
     .addFields(
       { name: 'Roblox ID', value: `\`${info.id}\``, inline: true },
       { name: 'Kicked by', value: `${interaction.user}`, inline: true },
@@ -211,50 +253,84 @@ export async function groupKickCommand(interaction) {
   for (const ch of gcfg.log_channels) await sendLog(interaction.guild, ch, { embeds: [logEmbed] });
 }
 
-export async function groupUnkickCommand(interaction) {
+export async function groupBanCommand(interaction) {
   const gcfg = getGroupConfig(interaction.guildId);
 
   if (!isHicomTier(interaction.member, gcfg)) {
-    return deny(interaction, `Only **${TIER_LABELS.tier3}** can un-kick people from the group.`);
+    return deny(interaction, `Only **${TIER_LABELS.tier3}** can ban people from the group.`);
   }
 
   const target = interaction.options.getUser('user');
+  const robloxInput = interaction.options.getString('roblox');
+  const reason = interaction.options.getString('reason', true);
   await interaction.deferReply();
 
-  const info = resolveVerified(interaction.guildId, target);
+  const info = await resolveGroupTarget(interaction.guildId, target, robloxInput);
   if (info.error) return interaction.editReply(`🚫 ${info.error}`);
-  const label = info.name ? `**${info.name}**` : 'their Roblox account';
 
-  const result = await unkickFromGroup(gcfg.group_id, info.id);
+  const result = await banFromGroup(gcfg.group_id, info.id);
   if (result.error) return interaction.editReply(`🚫 ${result.error}`);
 
   await interaction.editReply(
-    `✅ ${target} (${label}, ID \`${info.id}\`) is no longer kicked from group \`${gcfg.group_id}\` — they can rejoin.`,
+    `✅ Banned ${info.mention} (ID \`${info.id}\`) from group \`${gcfg.group_id}\` — they can’t rejoin until un-banned.`,
   );
 
-  const logEmbed = baseEmbed('♻️ Member Un-kicked')
-    .setDescription(`${target} (${label}) was un-kicked from group \`${gcfg.group_id}\` and may rejoin.`)
+  const logEmbed = baseEmbed('🔨 Member Banned')
+    .setDescription(`${info.mention} was banned from group \`${gcfg.group_id}\`.`)
     .addFields(
       { name: 'Roblox ID', value: `\`${info.id}\``, inline: true },
-      { name: 'Un-kicked by', value: `${interaction.user}`, inline: true },
+      { name: 'Banned by', value: `${interaction.user}`, inline: true },
+      { name: 'Reason', value: reason.slice(0, 1024) },
     );
   for (const ch of gcfg.log_channels) await sendLog(interaction.guild, ch, { embeds: [logEmbed] });
 }
 
-export async function groupKickedCommand(interaction) {
+export async function groupUnbanCommand(interaction) {
   const gcfg = getGroupConfig(interaction.guildId);
 
   if (!isHicomTier(interaction.member, gcfg)) {
-    return deny(interaction, `Only **${TIER_LABELS.tier3}** can view the kicked list.`);
+    return deny(interaction, `Only **${TIER_LABELS.tier3}** can un-ban people from the group.`);
+  }
+
+  const target = interaction.options.getUser('user');
+  const robloxInput = interaction.options.getString('roblox');
+  const reason = interaction.options.getString('reason', true);
+  await interaction.deferReply();
+
+  const info = await resolveGroupTarget(interaction.guildId, target, robloxInput);
+  if (info.error) return interaction.editReply(`🚫 ${info.error}`);
+
+  const result = await unbanFromGroup(gcfg.group_id, info.id);
+  if (result.error) return interaction.editReply(`🚫 ${result.error}`);
+
+  await interaction.editReply(
+    `✅ ${info.mention} (ID \`${info.id}\`) is no longer banned from group \`${gcfg.group_id}\` — they can rejoin.`,
+  );
+
+  const logEmbed = baseEmbed('♻️ Member Un-banned')
+    .setDescription(`${info.mention} was un-banned from group \`${gcfg.group_id}\` and may rejoin.`)
+    .addFields(
+      { name: 'Roblox ID', value: `\`${info.id}\``, inline: true },
+      { name: 'Un-banned by', value: `${interaction.user}`, inline: true },
+      { name: 'Reason', value: reason.slice(0, 1024) },
+    );
+  for (const ch of gcfg.log_channels) await sendLog(interaction.guild, ch, { embeds: [logEmbed] });
+}
+
+export async function groupBannedCommand(interaction) {
+  const gcfg = getGroupConfig(interaction.guildId);
+
+  if (!isHicomTier(interaction.member, gcfg)) {
+    return deny(interaction, `Only **${TIER_LABELS.tier3}** can view the banned list.`);
   }
 
   await interaction.deferReply({ ephemeral: true });
-  const result = await listKickedFromGroup(gcfg.group_id);
+  const result = await listBannedFromGroup(gcfg.group_id);
   if (result.error) return interaction.editReply(`🚫 ${result.error}`);
 
   if (!result.ids.length) {
     return interaction.editReply({
-      embeds: [baseEmbed('👢 Kicked From Group').setDescription('Nobody is currently kicked from the group.')],
+      embeds: [baseEmbed('🔨 Banned From Group').setDescription('Nobody is currently banned from the group.')],
     });
   }
 
@@ -271,7 +347,7 @@ export async function groupKickedCommand(interaction) {
   if (result.truncated) desc += '\n\n⚠️ Roblox returned more pages than I read — the list may be longer than shown.';
 
   await interaction.editReply({
-    embeds: [baseEmbed(`👢 Kicked From Group (${result.ids.length})`).setDescription(desc.slice(0, 4000))],
+    embeds: [baseEmbed(`🔨 Banned From Group (${result.ids.length})`).setDescription(desc.slice(0, 4000))],
   });
 }
 
