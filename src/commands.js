@@ -121,22 +121,49 @@ export const commands = [
 
   new SlashCommandBuilder()
     .setName('groupkick')
-    .setDescription('Kick a member from the Roblox group (HICOM only).')
+    .setDescription('Kick a member from the Roblox group — they can rejoin anytime (HICOM only).')
+    .addStringOption((o) => o.setName('reason').setDescription('Reason for the kick').setRequired(true))
     .addUserOption((o) =>
-      o.setName('user').setDescription('The verified Discord user to kick').setRequired(true),
+      o.setName('user').setDescription('A verified Discord user to kick').setRequired(false),
     )
-    .addStringOption((o) => o.setName('reason').setDescription('Reason for the kick').setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('groupunkick')
-    .setDescription('Reverse a kick so someone can rejoin the Roblox group (HICOM only).')
-    .addUserOption((o) =>
-      o.setName('user').setDescription('The verified Discord user to un-kick').setRequired(true),
+    .addStringOption((o) =>
+      o
+        .setName('roblox')
+        .setDescription('Their Roblox username or user ID, if they’re not verified')
+        .setRequired(false),
     ),
 
   new SlashCommandBuilder()
-    .setName('groupkicked')
-    .setDescription('List everyone currently kicked from the Roblox group (HICOM only).'),
+    .setName('groupban')
+    .setDescription('Ban a member from the Roblox group so they can’t rejoin (HICOM only).')
+    .addStringOption((o) => o.setName('reason').setDescription('Reason for the ban').setRequired(true))
+    .addUserOption((o) =>
+      o.setName('user').setDescription('A verified Discord user to ban').setRequired(false),
+    )
+    .addStringOption((o) =>
+      o
+        .setName('roblox')
+        .setDescription('Their Roblox username or user ID, if they’re not verified')
+        .setRequired(false),
+    ),
+
+  new SlashCommandBuilder()
+    .setName('groupunban')
+    .setDescription('Reverse a ban so someone can rejoin the Roblox group (HICOM only).')
+    .addStringOption((o) => o.setName('reason').setDescription('Reason for the un-ban').setRequired(true))
+    .addUserOption((o) =>
+      o.setName('user').setDescription('A verified Discord user to un-ban').setRequired(false),
+    )
+    .addStringOption((o) =>
+      o
+        .setName('roblox')
+        .setDescription('Their Roblox username or user ID, if they’re not verified')
+        .setRequired(false),
+    ),
+
+  new SlashCommandBuilder()
+    .setName('groupbanned')
+    .setDescription('List everyone currently banned from the Roblox group (HICOM only).'),
 
   new SlashCommandBuilder()
     .setName('verifypanel')
