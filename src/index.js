@@ -22,8 +22,9 @@ import {
   handleGroupApiComponent,
   groupAcceptCommand,
   groupKickCommand,
-  groupUnkickCommand,
-  groupKickedCommand,
+  groupBanCommand,
+  groupUnbanCommand,
+  groupBannedCommand,
 } from './grouprank.js';
 import {
   verifyPanelCommand,
@@ -88,10 +89,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return groupAcceptCommand(interaction);
         case 'groupkick':
           return groupKickCommand(interaction);
-        case 'groupunkick':
-          return groupUnkickCommand(interaction);
-        case 'groupkicked':
-          return groupKickedCommand(interaction);
+        case 'groupban':
+          return groupBanCommand(interaction);
+        case 'groupunban':
+          return groupUnbanCommand(interaction);
+        case 'groupbanned':
+          return groupBannedCommand(interaction);
         case 'verifypanel':
           return verifyPanelCommand(interaction);
         case 'verify':
