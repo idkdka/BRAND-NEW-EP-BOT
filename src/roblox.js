@@ -101,24 +101,38 @@ export async function acceptJoinRequest(groupId, robloxUserId) {
   return { ok: true };
 }
 
-// ---------- Group kicks (legacy cookie-authenticated Ban API) ----------
+// ---------- Group removal (legacy, cookie-authenticated) ----------
 // Open Cloud (the ROBLOX_API_KEY used everywhere else in this file) has NO
 // endpoint to remove an existing group member — Roblox has never shipped one.
-// The real mechanism is Roblox's Group Ban system (groups.roblox.com/v1/groups/
-// {id}/bans/{userId}), which removes the member AND blocks them (and their alts)
-// from rejoining until unbanned — a proper kick, not just a one-time removal.
-// It authenticates with a logged-in account's session cookie instead of an API
-// key. Requires ROBLOX_COOKIE (a .ROBLOSECURITY value) in the environment; the
-// account it belongs to must outrank whoever it's kicking.
+// Both mechanisms below live under groups.roblox.com's legacy API instead, and
+// both authenticate with a logged-in account's session cookie rather than an
+// API key (ROBLOX_COOKIE, a .ROBLOSECURITY value). The account behind that
+// cookie must outrank whoever it's acting on, and — for the plain kick below —
+// also needs the group's "kick members" permission bound to its role (rank
+// alone isn't enough for that one; the Ban system only needs rank).
 //
-// User-facing wording always says "kick" / "kicked", never "ban" — this is just
-// which underlying Roblox mechanism makes that stick.
+// Two distinct mechanisms, not two words for the same thing:
+//   - removeFromGroup()  -> DELETE /groups/{id}/users/{userId}   (plain kick:
+//     one-time removal, they're free to rejoin any time — /groupkick)
+//   - banFromGroup()     -> POST   /groups/{id}/bans/{userId}    (Group Ban:
+//     removes AND blocks them, and their alts, from rejoining — /groupban)
+//     unbanFromGroup()   -> DELETE /groups/{id}/bans/{userId}    (lifts a ban
+//     — /groupunban)
+//     listBannedFromGroup() -> GET /groups/{id}/bans             (/groupbanned)
 
 const GROUPS_V1 = 'https://groups.roblox.com/v1';
 
 function cookieHeader() {
   const cookie = process.env.ROBLOX_COOKIE;
   return cookie ? `.ROBLOSECURITY=${cookie}` : null;
+}
+
+// Shared by both mechanisms: turn a legacyFetch() failure into a message,
+// special-casing the "not actually a member" case both give a variant of.
+function legacyErrorMessage(result, action, notMemberMsg) {
+  const msg = result.json?.errors?.[0]?.message || result.json?.message || 'unknown';
+  if (/invalid|does not exist|not.*member/i.test(msg)) return notMemberMsg;
+  return `Roblox rejected the ${action} (HTTP ${result.status}: ${msg}).`;
 }
 
 // Roblox's cookie-authenticated endpoints require an X-CSRF-TOKEN header, which
@@ -129,7 +143,7 @@ function cookieHeader() {
 async function legacyFetch(path, options = {}, _retried = false) {
   const cookie = cookieHeader();
   if (!cookie) {
-    return { error: 'ROBLOX_COOKIE is not configured — kicking group members needs a logged-in Roblox session.' };
+    return { error: 'ROBLOX_COOKIE is not configured — removing group members needs a logged-in Roblox session.' };
   }
 
   const res = await fetch(`${GROUPS_V1}${path}`, {
@@ -151,31 +165,62 @@ async function legacyFetch(path, options = {}, _retried = false) {
   } catch {
     json = { raw: text };
   }
+
+  // Roblox returns 401 ("The user is not authenticated") when the cookie is
+  // missing, malformed, or the session behind it has been invalidated — never
+  // when a *valid* session simply lacks permission (that's a 403 instead). Give
+  // a fix-it message here instead of surfacing Roblox's cryptic wording as-is.
+  if (res.status === 401) {
+    return {
+      error:
+        'Roblox says the configured `ROBLOX_COOKIE` is invalid or expired, so it can’t log in as that account ' +
+        'anymore. Fresh cookie needed: log into the kicking account in a browser, open DevTools → Application → ' +
+        'Cookies → roblox.com, find `.ROBLOSECURITY`, and copy its **entire** value (including the leading ' +
+        '`_|WARNING:-DO-NOT-SHARE-THIS...|_` text, if present — Roblox treats that as part of the real value). ' +
+        'Update `ROBLOX_COOKIE` in Railway’s Variables tab with it and redeploy. Session cookies also get ' +
+        'invalidated if that account’s password changes, it gets logged out elsewhere, or Roblox flags the ' +
+        'server’s IP as suspicious — regenerating the cookie fixes all of those.',
+    };
+  }
+
   return { ok: res.ok, status: res.status, json };
 }
 
-// Kick (ban) a member out of the group. Returns { ok } or { error }.
-export async function kickFromGroup(groupId, robloxUserId) {
-  const result = await legacyFetch(`/groups/${groupId}/bans/${robloxUserId}`, { method: 'POST', body: '{}' });
+// Plain kick: remove a member from the group with no ban attached — they can
+// rejoin (or re-request to join) immediately. Returns { ok } or { error }.
+export async function removeFromGroup(groupId, robloxUserId) {
+  const result = await legacyFetch(`/groups/${groupId}/users/${robloxUserId}`, { method: 'DELETE' });
   if (result.error) return result;
   if (!result.ok) {
-    const msg = result.json?.errors?.[0]?.message || result.json?.message || 'unknown';
-    if (result.status === 400 && /not.*member/i.test(msg)) {
-      return { error: 'That user is not a member of the group.' };
-    }
-    return { error: `Roblox rejected the kick (HTTP ${result.status}: ${msg}).` };
+    return {
+      error: legacyErrorMessage(
+        result,
+        'kick',
+        'That user isn’t a member of the group (or the ID is invalid) — or the kicking account lacks the group’s “kick members” permission.',
+      ),
+    };
   }
   return { ok: true };
 }
 
-// Lift a kick, letting the user rejoin the group. Returns { ok } or { error }.
-export async function unkickFromGroup(groupId, robloxUserId) {
+// Ban a member out of the group — removes them AND blocks them (and their
+// alts) from rejoining until unbanned. Returns { ok } or { error }.
+export async function banFromGroup(groupId, robloxUserId) {
+  const result = await legacyFetch(`/groups/${groupId}/bans/${robloxUserId}`, { method: 'POST', body: '{}' });
+  if (result.error) return result;
+  if (!result.ok) {
+    return { error: legacyErrorMessage(result, 'ban', 'That user is not a member of the group.') };
+  }
+  return { ok: true };
+}
+
+// Lift a ban, letting the user rejoin the group. Returns { ok } or { error }.
+export async function unbanFromGroup(groupId, robloxUserId) {
   const result = await legacyFetch(`/groups/${groupId}/bans/${robloxUserId}`, { method: 'DELETE' });
   if (result.error) return result;
   if (!result.ok) {
-    if (result.status === 404) return { error: 'That user isn’t currently kicked from the group.' };
-    const msg = result.json?.errors?.[0]?.message || result.json?.message || 'unknown';
-    return { error: `Roblox rejected the un-kick (HTTP ${result.status}: ${msg}).` };
+    if (result.status === 404) return { error: 'That user isn’t currently banned from the group.' };
+    return { error: legacyErrorMessage(result, 'un-ban', 'That user is not currently banned from the group.') };
   }
   return { ok: true };
 }
@@ -194,11 +239,11 @@ function extractBannedUserId(item) {
   return null;
 }
 
-// List everyone currently kicked from the group. Returns { ids, truncated } or
+// List everyone currently banned from the group. Returns { ids, truncated } or
 // { error }. Capped at a generous page count as a loop safety net, since the
 // pagination shape isn't officially documented — `truncated` is set (never
 // silently dropped) if the cap was actually hit.
-export async function listKickedFromGroup(groupId) {
+export async function listBannedFromGroup(groupId) {
   const ids = [];
   let cursor = '';
   let pages = 0;
@@ -210,7 +255,7 @@ export async function listKickedFromGroup(groupId) {
     if (result.error) return result;
     if (!result.ok) {
       const msg = result.json?.errors?.[0]?.message || result.json?.message || 'unknown';
-      return { error: `Roblox rejected the kicked-list request (HTTP ${result.status}: ${msg}).` };
+      return { error: `Roblox rejected the banned-list request (HTTP ${result.status}: ${msg}).` };
     }
     for (const item of result.json?.data || []) {
       const id = extractBannedUserId(item);
